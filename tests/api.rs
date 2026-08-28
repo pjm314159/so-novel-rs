@@ -241,6 +241,22 @@ async fn download_progress_replays_terminal_state_with_compat_fields() {
     assert!(body.contains("斗破苍穹"), "终态载荷应含文件名: {body}");
 }
 
+#[tokio::test]
+async fn download_progress_without_jobs_keeps_connection_pending() {
+    let state = test_state();
+    let app = router(state);
+    let resp = app
+        .oneshot(Request::get("/download-progress").body(Body::empty()).expect("请求构造失败"))
+        .await
+        .expect("请求失败");
+    assert_eq!(resp.status(), StatusCode::OK);
+    // 无任务时流必须挂起（keep-alive 保活）而非立即结束：
+    // 立即结束会触发浏览器 EventSource 自动重连，造成"连接异常/成功"循环提示
+    let result =
+        tokio::time::timeout(std::time::Duration::from_millis(500), resp.into_body().collect()).await;
+    assert!(result.is_err(), "无任务时 SSE 流不应在短窗口内结束，应保持挂起");
+}
+
 // ---------- /local-books、/book-download、/book-delete、/sources/check（M4） ----------
 
 /// 建临时下载目录并写入一个产物文件，返回 (目录, 文件名, 内容)。

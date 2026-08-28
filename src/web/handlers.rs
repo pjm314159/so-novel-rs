@@ -88,9 +88,17 @@ struct ErrorBody {
     data: (),
 }
 
+/// GET `/config` 响应：配置展开 + 程序版本（前端徽章显示）
+#[derive(Serialize)]
+pub struct ConfigResponse {
+    #[serde(flatten)]
+    pub config: AppConfig,
+    pub version: &'static str,
+}
+
 /// GET `/config`：只读返回运行配置（与源项目 `ConfigServlet` 一致，无 POST 修改）
-pub async fn get_config(State(state): State<Arc<AppState>>) -> Json<ApiOk<AppConfig>> {
-    Json(ApiOk::wrap(state.config.clone()))
+pub async fn get_config(State(state): State<Arc<AppState>>) -> Json<ApiOk<ConfigResponse>> {
+    Json(ApiOk::wrap(ConfigResponse { config: state.config.clone(), version: env!("CARGO_PKG_VERSION") }))
 }
 
 /// 书源列表项（`/sources` 响应）

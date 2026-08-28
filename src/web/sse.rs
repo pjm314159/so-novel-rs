@@ -41,8 +41,10 @@ pub async fn download_progress(
     };
     let stream: Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>> = match job {
         Some((snapshot, rx)) => Box::pin(progress_stream(snapshot, rx)),
-        // 无可订阅任务：仅保活心跳（对应源项目连接即挂起等待推送）
-        None => Box::pin(futures_util::stream::empty::<Result<Event, Infallible>>()),
+        // 无可订阅任务：流永久挂起，仅由 keep-alive 心跳维持连接
+        // （对应源项目连接即挂起等待推送；不可用 empty——立即结束会触发
+        //   浏览器 EventSource 自动重连，造成"连接异常/成功"循环提示）
+        None => Box::pin(futures_util::stream::pending::<Result<Event, Infallible>>()),
     };
     Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text("keep-alive"))
 }

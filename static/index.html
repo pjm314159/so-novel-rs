@@ -13,7 +13,7 @@
   <meta content="telephone=no" name="format-detection">
   <title>SoNovel WebUI</title>
   <link href="favicon.ico" rel="icon">
-  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="vendor/tailwind.js"></script>
   <script>
     tailwind.config = {
       theme: {
@@ -27,7 +27,7 @@
       }
     }
   </script>
-  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <script defer src="vendor/alpine.min.js"></script>
   <style>
     [x-cloak] {
       display: none !important
@@ -40,7 +40,8 @@
   </style>
 </head>
 <body class="bg-gray-50 text-gray-800 font-sans leading-relaxed min-h-screen overflow-x-hidden"
-      x-data="App()" x-init="init()">
+      x-data="App()">
+      <!-- Alpine 对 x-data 组件自动调用 init()，无需 x-init 显式调用（重复调用会建两条 SSE 连接） -->
 
 <div class="max-w-5xl mx-auto px-4 py-4 sm:px-6 sm:py-6 flex flex-col min-h-screen" x-cloak>
   <header class="relative flex flex-col items-center mb-6 sm:mb-8 pt-2 pb-1">
@@ -55,7 +56,7 @@
     <a :href="versionLink"
        class="mt-2.5 inline-flex items-center text-xs sm:text-sm text-green-700 bg-green-50 px-2.5 py-0.5 rounded-full no-underline hover:bg-green-100 transition-colors ring-1 ring-green-200/60"
        target="_blank"
-       x-text="'v' + (serverConfig.version || 'ersion')"></a>
+       x-text="serverConfig.version ? 'v' + serverConfig.version : ''"></a>
     <button @click="settingsVisible = !settingsVisible"
             class="absolute right-0 top-1/2 -translate-y-1/2 flex items-center gap-2 text-xs text-gray-400 hover:text-primary transition-colors">
       <span>设置</span>
@@ -271,7 +272,8 @@
     <section :class="sectionClass">
       <div class="flex items-center justify-between mb-5">
         <h2 class="my-0" :class="h2Class">已下书籍</h2>
-        <button @click="fetchLocalBooks" :class="iconBtnClass"
+        <button @click="fetchLocalBooks"
+                :class="iconBtnClass + (refreshingBooks ? ' animate-spin opacity-50 pointer-events-none' : '')"
                 title="刷新" x-html="iconRefresh"></button>
       </div>
 
@@ -555,6 +557,7 @@
       iconRefresh: '<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" stroke-linecap="round" stroke-linejoin="round"/></svg>',
       showTip: false,
       tipText: '正在加载...',
+      refreshingBooks: false,
       downloadCurrent: 0,
       downloadTotal: 0,
 
@@ -746,7 +749,8 @@
       },
 
       async fetchLocalBooks() {
-        this.displayTip('正在刷新...')
+        // 本地磁盘扫描（毫秒级），静默刷新即可，不弹全屏遮罩
+        this.refreshingBooks = true
         try {
           const data = await Api.getLocalBooks()
           if (data && data.data) {
@@ -755,9 +759,9 @@
             this.localBooks = data.data
           }
         } catch (error) {
-          alert(`刷新已下书籍失败: ${error.message}`)
+          console.warn('刷新已下书籍失败:', error.message)
         } finally {
-          this.hideTip()
+          this.refreshingBooks = false
         }
       },
 
@@ -824,11 +828,14 @@
 
       initSSE() {
         const evtSource = new EventSource('/download-progress')
-        evtSource.onopen = (event) => {
-          console.log("✅ SSE 已连接")
+        evtSource.onopen = () => {
+          console.log('SSE 已连接')
         }
-        evtSource.onerror = (event) => {
-          console.warn("❌ SSE 连接异常，浏览器将自动重连", event)
+        // 服务端无任务时保持长连接（仅心跳），不会反复断开；
+        // 网络级 error（原生 Event，无 data）交给浏览器按 retry 间隔自动重连
+        evtSource.onerror = (e) => {
+          if (e instanceof MessageEvent) return // named error：服务端失败终态，由下方监听器处理
+          console.warn('SSE 连接中断，稍后自动重连')
         }
         evtSource.onmessage = (e) => {
           try {
@@ -838,9 +845,26 @@
               this.downloadTotal = data.total
             }
           } catch (err) {
-            console.error("❌ SSE 数据解析失败:", err, e.data)
+            console.error('SSE 数据解析失败:', err, e.data)
           }
         }
+        // 终态事件：服务端推送后即关闭流，前端同步 close 防止无效重连
+        const finish = () => {
+          evtSource.close()
+          this.downloadCurrent = 0
+          this.downloadTotal = 0
+          this.fetchLocalBooks()
+        }
+        evtSource.addEventListener('done', () => finish())
+        // named "error" 与原生错误同名：带 data 的才是服务端失败终态
+        evtSource.addEventListener('error', (e) => {
+          if (!e.data) return
+          try {
+            const data = JSON.parse(e.data)
+            console.error('下载失败:', data.failedReason || '未知原因')
+          } catch (_) {}
+          finish()
+        })
       },
 
       loadSearchHistory() {

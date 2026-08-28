@@ -29,10 +29,15 @@ fn test_state() -> Arc<AppState> {
 
 /// 离线规则状态：唯一书源指向本机不可达端口（受理成功但任务即刻失败，不触外网）。
 fn offline_state() -> Arc<AppState> {
+    // 多个测试并发调用本函数：临时规则文件只初始化一次。
+    // 否则 `fs::write` 的 truncate 瞬间会被并发 load 读到空文件（CI 暴露的竞态）。
+    static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     let dir = std::env::temp_dir().join("sonovel-rs-api-test-rules");
-    std::fs::create_dir_all(&dir).expect("创建临时规则目录失败");
-    std::fs::write(dir.join("offline.json"), r#"[{"url":"http://127.0.0.1:9/","name":"离线源"}]"#)
-        .expect("写入临时规则失败");
+    INIT.get_or_init(|| {
+        std::fs::create_dir_all(&dir).expect("创建临时规则目录失败");
+        std::fs::write(dir.join("offline.json"), r#"[{"url":"http://127.0.0.1:9/","name":"离线源"}]"#)
+            .expect("写入临时规则失败");
+    });
     let mut config = AppConfig::default();
     config.source.active_rules = "offline.json".into();
     // 在线规则更新指向本机不可达端口（/rules/update 拉取失败测试，不触外网）

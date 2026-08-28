@@ -1,0 +1,142 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+          # rquickjs/zstd-sys 等 C 依赖的交叉编译经 cross 容器完成（自带完整工具链）
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+            cross: true
+          # macos-latest 为 Apple Silicon 原生
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          # macOS 交叉编译 Intel（rustup target 即可，无需外部链接器）
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 校验 tag 与 Cargo.toml 版本一致
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: |
+          cargo_version=$(grep -m1 '^version' Cargo.toml | sed 's/version *= *"\(.*\)"/\1/')
+          tag_version="${GITHUB_REF_NAME#v}"
+          echo "Cargo.toml: ${cargo_version} / tag: ${tag_version}"
+          if [ "${cargo_version}" != "${tag_version}" ]; then
+            echo "ERROR: tag v${tag_version} 与 Cargo.toml version ${cargo_version} 不一致，请先更新版本号" >&2
+            exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: 构建（cross 或 cargo）
+        if: matrix.cross
+        uses: houseabsolute/actions-rust-cross@v1
+        with:
+          command: build
+          target: ${{ matrix.target }}
+          args: --release
+
+      - name: 构建（cargo）
+        if: '!matrix.cross'
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: 校验产物体积（含嵌入词库，预算 15MB）
+        shell: bash
+        run: |
+          f="target/${{ matrix.target }}/release/so-novel-rs"
+          [ -f "$f.exe" ] && f="$f.exe"
+          size=$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f")
+          echo "产物体积: ${size} bytes"
+          if [ "$size" -gt 15728640 ]; then
+            echo "ERROR: 产物超过 15MB 体积预算" >&2; exit 1
+          fi
+
+      # 发布包 = 二进制 + 书源规则 + 前端资源（均为运行必需）
+      - name: 打包
+        shell: bash
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          name="so-novel-rs-${VERSION}-${{ matrix.target }}"
+          stage="dist/${name}"
+          mkdir -p "${stage}"
+          # 二进制（Windows 带 .exe 后缀）
+          src="target/${{ matrix.target }}/release/so-novel-rs"
+          if [ -f "${src}.exe" ]; then cp "${src}.exe" "${stage}/so-novel-rs.exe"; else cp "${src}" "${stage}/so-novel-rs"; fi
+          # 运行时资源
+          cp -r rules "${stage}/rules"
+          cp -r static "${stage}/static"
+          cp README.md "${stage}/"
+          # 归档（Windows 的 Git Bash 无 zip 命令，用 runner 自带的 7z）
+          cd dist
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            "/c/Program Files/7-Zip/7z.exe" a -tzip "${name}.zip" "${name}"
+          else
+            tar -czf "${name}.tar.gz" "${name}"
+          fi
+          cd ..
+
+      - name: 生成校验和
+        shell: bash
+        run: |
+          cd dist
+          for f in *.zip *.tar.gz; do
+            [ -f "$f" ] || continue
+            sha256sum "$f" >> sha256sums.txt
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/*
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: ncipollo/release-action@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          artifacts: "dist/*.zip,dist/*.tar.gz,dist/sha256sums.txt"
+          generateReleaseNotes: true
+          allowUpdates: true

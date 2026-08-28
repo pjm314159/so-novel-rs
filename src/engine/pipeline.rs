@@ -2,9 +2,10 @@
 //!
 //! 每 `/book-fetch` 请求生成一个 Job task：解析目录/详情 → 创建书籍目录 →
 //! `Semaphore(concurrency)` 章节并发（每章：抓取 → 净化渲染 → 落盘）→ Merging → Done。
-//! 章节失败不中断整本书（设计文档 §10）；合并输出（txt/epub）在 M4 接入。
+//! 某章最终失败即中止剩余章节（fail-fast），任务转入 Failed 且不产出文件；合并输出（txt/epub）在 M4 接入。
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use tokio::sync::Semaphore;
@@ -83,6 +84,8 @@ async fn run(env: &JobEnv, job_id: &str, book_url: &str) -> Result<(), BoxError>
     let file_ext = if ext == "epub" { "html" } else { "txt" };
 
     let sem = Arc::new(Semaphore::new(max_concurrent));
+    // fail-fast：任一章最终失败后置位，排队中的章节任务直接跳过不再发请求
+    let aborted = Arc::new(AtomicBool::new(false));
     let mut set: JoinSet<()> = JoinSet::new();
     for ch in toc {
         let permit = sem.clone().acquire_owned();
@@ -95,8 +98,14 @@ async fn run(env: &JobEnv, job_id: &str, book_url: &str) -> Result<(), BoxError>
         let dir = dir.clone();
         let ext = ext.to_owned();
         let file_ext = file_ext.to_owned();
+        let aborted = Arc::clone(&aborted);
         set.spawn(async move {
             let _permit = permit.await.expect("信号灯在任务运行期间不会被关闭");
+            if aborted.load(Ordering::Relaxed) {
+                // 已有失败章节：静默跳过（计 failed，不重复刷日志）
+                registry.update(&job_id, |s| s.failed += 1);
+                return;
+            }
             match chapter::fetch_chapter(&client, &rule, &params, &cf_bypass, &ch.url, &ch.title).await {
                 Ok(raw) => {
                     let mut rendered = render::render_chapter(&rule.chapter, &ext, &ch.title, &raw);
@@ -113,6 +122,7 @@ async fn run(env: &JobEnv, job_id: &str, book_url: &str) -> Result<(), BoxError>
                     ));
                     if let Err(e) = tokio::fs::write(&path, rendered.content.as_bytes()).await {
                         tracing::error!(chapter = %ch.title, error = %e, "章节缓存落盘失败");
+                        aborted.store(true, Ordering::Relaxed);
                         registry.update(&job_id, |s| s.failed += 1);
                         return;
                     }
@@ -122,19 +132,35 @@ async fn run(env: &JobEnv, job_id: &str, book_url: &str) -> Result<(), BoxError>
                     });
                 }
                 Err(e) => {
-                    tracing::error!(chapter = %ch.title, url = %ch.url, error = %e, "章节下载失败（含重试）");
+                    // 仅首个失败记录详细错误，随后中止剩余章节请求
+                    if !aborted.swap(true, Ordering::Relaxed) {
+                        tracing::error!(
+                            chapter = %ch.title, url = %ch.url, error = %e,
+                            "章节下载失败（含重试），中止剩余章节请求"
+                        );
+                    }
                     registry.update(&job_id, |s| s.failed += 1);
                 }
             }
         });
     }
-    while set.join_next().await.is_some() {}
+    while let Some(res) = set.join_next().await {
+        if res.is_err() {
+            // 任务 panic：章节静默缺失，必须计入 failed（否则 failed=0 假象）
+            aborted.store(true, Ordering::Relaxed);
+            registry.update(job_id, |s| s.failed += 1);
+        }
+    }
 
     // 4. 合并输出（Phase::Merging → Done）
+    let failed = registry.get(job_id).map_or(0, |s| s.failed);
+    if failed > 0 {
+        // 存在失败章节：输出必然残缺，不生成最终文件（章节缓存保留，重下可命中）
+        return Err(format!("{failed} 章下载失败，已中止剩余请求，未生成输出文件").into());
+    }
     registry.update(job_id, |s| s.phase = super::Phase::Merging);
     let output_name = merge::merge_and_finalize(config, &client, &book, &dir).await?;
     registry.update(job_id, |s| s.filename = Some(output_name.clone()));
-    let failed = registry.get(job_id).map_or(0, |s| s.failed);
-    tracing::info!(job = job_id, file = %output_name, failed, "下载完成");
+    tracing::info!(job = job_id, file = %output_name, "下载完成");
     Ok(())
 }

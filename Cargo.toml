@@ -24,8 +24,10 @@ toml = "0.8"
 thiserror = "2"
 # 日志：tracing 双输出（stderr + 文件按日滚动）
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "time"] }
 tracing-appender = "0.2"
+# 日志时间戳：北京时区固定偏移（OffsetTime + Rfc3339）
+time = { version = "0.3", default-features = false, features = ["formatting", "macros"] }
 # 并发原语
 arc-swap = "1"
 dashmap = "6"

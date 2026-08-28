@@ -28,20 +28,45 @@ fn main() -> Result<(), BoxError> {
         .or_else(|_| EnvFilter::try_new(&config.log.level))
         .or_else(|_| EnvFilter::try_new("info"))
         .map_err(|e| -> BoxError { format!("日志过滤器初始化失败: {e}").into() })?;
+    // 北京时间（中国无夏令时，固定 +8；用固定偏移避免多线程下本地时区获取失败）。
+    // OffsetTime 未实现 Clone，多 layer 时需各自构建
+    let beijing_timer = || {
+        tracing_subscriber::fmt::time::OffsetTime::new(
+            time::macros::offset!(+8),
+            time::format_description::well_known::Rfc3339,
+        )
+    };
     let file_appender = tracing_appender::rolling::daily(&config.log.dir, "so-novel-rs");
     // guard 必须存活到进程退出，否则日志可能丢失（drop 时 flush）
     let (file_writer, _log_guard) = tracing_appender::non_blocking(file_appender);
     // NonBlocking 可 Clone（内部为 Arc 句柄）；两个分支各自构建 layer 避免泛型推断冲突
+    // ANSI 转义一律关闭（终端/文件均输出纯文本）
     if config.log.stdout {
         tracing_subscriber::registry()
             .with(env_filter)
-            .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr).with_target(false))
-            .with(tracing_subscriber::fmt::layer().with_writer(file_writer))
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(std::io::stderr)
+                    .with_target(false)
+                    .with_ansi(false)
+                    .with_timer(beijing_timer()),
+            )
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(file_writer)
+                    .with_ansi(false)
+                    .with_timer(beijing_timer()),
+            )
             .init();
     } else {
         tracing_subscriber::registry()
             .with(env_filter)
-            .with(tracing_subscriber::fmt::layer().with_writer(file_writer))
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(file_writer)
+                    .with_ansi(false)
+                    .with_timer(beijing_timer()),
+            )
             .init();
     }
 

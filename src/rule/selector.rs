@@ -161,9 +161,11 @@ fn remove_paired_tags(input: &str, tag: &str, attr_part: &str) -> String {
         None
     };
 
-    let lower = input.to_lowercase();
-    let open = format!("<{}", tag.to_lowercase());
-    let close = format!("</{}>", tag.to_lowercase());
+    // ASCII 小写：字节长度与 input 恒等（to_lowercase 对 'Ⅰ'/'İ' 等会改变长度，
+    // 导致 lower 偏移切 input 时越过字符边界 panic）；标签本身即 ASCII
+    let lower = input.to_ascii_lowercase();
+    let open = format!("<{}", tag.to_ascii_lowercase());
+    let close = format!("</{}>", tag.to_ascii_lowercase());
     let is_tag_head = |b: Option<u8>| matches!(b, Some(b'>' | b' ' | b'\t' | b'\n' | b'\r' | b'/'));
 
     let mut out = String::with_capacity(input.len());
@@ -172,9 +174,12 @@ fn remove_paired_tags(input: &str, tag: &str, attr_part: &str) -> String {
         let start = cursor + rel;
         let head_end = lower[start..].find('>').map_or(lower.len(), |i| start + i + 1);
         if !is_tag_head(lower.as_bytes().get(start + open.len()).copied()) {
-            // 伪开标签（如 <divx），跳过
-            out.push_str(&input[cursor..head_end.min(start + open.len() + 1)]);
-            cursor = head_end.min(start + open.len() + 1);
+            // 伪开标签（如 <divx、<h3总）：跳过标签头及紧邻的一个字符。
+            // 必须按 UTF-8 字符推进：紧贴多字节字符时 +1 字节会切进字符中间 panic
+            let mut skip = start + open.len();
+            skip += input[skip..].chars().next().map_or(0, char::len_utf8);
+            out.push_str(&input[cursor..skip]);
+            cursor = skip;
             continue;
         }
         if has_attr && !attr_re.as_ref().is_none_or(|re| re.is_match(&lower[start..head_end])) {
@@ -505,6 +510,27 @@ mod tests {
         let out =
             remove_tags(r#"<h3>标题</h3>正文<div class="a">x<div class="b">y</div>z</div>尾"#, "h3, div");
         assert_eq!(out, "正文尾");
+    }
+
+    #[test]
+    fn remove_tags_offsets_survive_lowercase_length_change() {
+        // 'Ⅰ' 小写化后从 3 字节缩为 1 字节：此前 lower=input.to_lowercase() 与
+        // input 字节偏移错位，用 lower 偏移切 input 会越过字符边界 panic（线上实测）
+        let input = "Ⅰ<h3>标题</h3>正文";
+        let out = remove_tags(input, "h3");
+        assert_eq!(out, "Ⅰ正文");
+    }
+
+    #[test]
+    fn remove_tags_pseudo_open_tag_adjacent_multibyte_char() {
+        // '<h3' 紧贴多字节字符（伪开标签）：此前跳过时 +1 字节切进字符中间 panic
+        //（线上实录：end byte index 2691 is not a char boundary; it is inside '总'）
+        let input = "<h3总标题</h3>正文";
+        assert_eq!(remove_tags(input, "h3"), input, "伪开标签整体保留且不 panic");
+
+        // 多字节紧贴不影响后续正常配对的删除
+        let out = remove_tags("<h3总<div>x</div>尾", "h3, div");
+        assert_eq!(out, "<h3总尾");
     }
 
     #[test]

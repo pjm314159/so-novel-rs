@@ -78,8 +78,10 @@ async fn fetch_content(
 pub(crate) fn extract_page_content(r: &ChapterRule, body: &str, url: &str) -> Result<String, BoxError> {
     let doc = scraper::Html::parse_document(body);
     // DSL 前先删 filterTag 杂质（如 wxsy：h3/div 与 base64 同行会导致解码失败）
-    let content =
-        selector::extract_html_with_filter(&doc, &r.content, &r.filter_tag).ok().flatten().unwrap_or_default();
+    let content = selector::extract_html_with_filter(&doc, &r.content, &r.filter_tag)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
     if content.is_empty() {
         return Err(format!("正文内容为空: {url}").into());
     }

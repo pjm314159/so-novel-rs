@@ -142,9 +142,17 @@ fn remove_paired_tags(input: &str, tag: &str, attr_part: &str) -> String {
     let attr_re = if has_attr {
         regex::Regex::new(&format!(
             r#"(?i)\b{}\s*=\s*["']?{}["']?"#,
-            regex::escape(attr_part.trim_matches(|c| c == '[' || c == ']').split_once('=').map_or(tag, |(n, _)| n.trim())),
             regex::escape(
-                attr_part.trim_matches(|c| c == '[' || c == ']').split_once('=').map_or("", |(_, v)| v.trim())
+                attr_part
+                    .trim_matches(|c| c == '[' || c == ']')
+                    .split_once('=')
+                    .map_or(tag, |(n, _)| n.trim())
+            ),
+            regex::escape(
+                attr_part
+                    .trim_matches(|c| c == '[' || c == ']')
+                    .split_once('=')
+                    .map_or("", |(_, v)| v.trim())
             )
             .replace(';', "")
         ))
@@ -156,7 +164,9 @@ fn remove_paired_tags(input: &str, tag: &str, attr_part: &str) -> String {
     let lower = input.to_lowercase();
     let open = format!("<{}", tag.to_lowercase());
     let close = format!("</{}>", tag.to_lowercase());
-    let is_tag_head = |b: Option<u8>| matches!(b, Some(b'>') | Some(b' ') | Some(b'\t') | Some(b'\n') | Some(b'\r') | Some(b'/'));
+    let is_tag_head = |b: Option<u8>| {
+        matches!(b, Some(b'>') | Some(b' ') | Some(b'\t') | Some(b'\n') | Some(b'\r') | Some(b'/'))
+    };
 
     let mut out = String::with_capacity(input.len());
     let mut cursor = 0usize;
@@ -497,7 +507,8 @@ mod tests {
     #[test]
     fn remove_tags_deletes_paired_nested_and_attr_constrained() {
         // 嵌套 div 自内向外全部删除
-        let out = remove_tags(r#"<h3>标题</h3>正文<div class="a">x<div class="b">y</div>z</div>尾"#, "h3, div");
+        let out =
+            remove_tags(r#"<h3>标题</h3>正文<div class="a">x<div class="b">y</div>z</div>尾"#, "h3, div");
         assert_eq!(out, "正文尾");
     }
 

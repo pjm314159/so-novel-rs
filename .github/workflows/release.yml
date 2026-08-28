@@ -62,15 +62,15 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      # cross 官方容器自带完整交叉工具链（含 rquickjs/zstd 等 C 依赖的编译器）；
-      # 不用第三方 action，act 本地调试与 GitHub Actions 行为一致
-      - name: 构建（cross 容器交叉编译）
+      # 官方 cross action：自动把宿主工具链/registry 挂入 cross 容器
+      # （镜像本身不含 cargo，仅提供交叉工具链与 std）
+      - name: 构建（cross 交叉编译）
         if: matrix.cross
-        shell: bash
-        run: |
-          docker run --rm -v "$(pwd)":/project -w /project \
-            ghcr.io/cross-rs/${{ matrix.target }}:0.2.5 \
-            bash -c "cargo build --release --target ${{ matrix.target }} && chown -R $(id -u):$(id -g) target"
+        uses: houseabsolute/actions-rust-cross@v1
+        with:
+          command: build
+          target: ${{ matrix.target }}
+          args: --release
 
       - name: 构建（cargo）
         if: '!matrix.cross'

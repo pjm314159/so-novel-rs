@@ -36,7 +36,6 @@
 
 ```bash
 cargo build --release
-./target/release/so-novel-rs
 ```
 
 运行时依赖工作目录下的 `rules/`（书源规则）与 `static/`（前端页面），仓库已自带。
@@ -117,7 +116,6 @@ curl -N "http://127.0.0.1:7765/download-progress?id=<jobId>"
 | 输出格式 | txt / epub / html / pdf | txt / epub |
 | 配置格式 | config.ini | config.toml（字段语义一一对应） |
 
-明确裁剪：CLI/TUI、自动更新、匿名上报、捐赠页、html/pdf 输出。
 
 ## 开发
 
@@ -127,18 +125,8 @@ cargo clippy --all-targets   # stable/nightly 零警告
 cargo fmt --all -- --check
 ```
 
-架构与设计决策见 [docs/so-novel-rust-rewrite-design.md](../docs/so-novel-rust-rewrite-design.md)（上级仓库目录）。
 
-## 发布
 
-推送 `v*` 标签触发自动发布：
-
-```bash
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-GitHub Actions 自动构建 Windows / Linux / macOS（x64 + ARM64）产物，打包书源规则与前端资源，校验和后发布到 Releases。
 
 ## 免责声明
 

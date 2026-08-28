@@ -1,0 +1,78 @@
+[package]
+name = "so-novel-rs"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "so-novel 的 Rust 重写：多书源小说下载 Web 服务（仅 Web 形态，低内存，单二进制）"
+license = "MIT"
+
+[dependencies]
+# 异步运行时：feature 最小化，不使用 full
+tokio = { version = "1", features = ["rt-multi-thread", "net", "fs", "signal", "macros", "time", "sync"] }
+# Web 框架（Jetty + Servlet 的对应物）
+axum = "0.8"
+tower-http = { version = "0.6", features = ["fs", "trace"] }
+# HTTP 客户端（rustls，禁默认特性；代理/压缩支持）
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip", "brotli", "deflate"] }
+# HTML 解析 + CSS 选择器（Jsoup 的对应物）
+scraper = "0.23"
+# 序列化
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+# 错误处理：统一 thiserror 枚举
+thiserror = "2"
+# 日志：tracing 双输出（stderr + 文件按日滚动）
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-appender = "0.2"
+# 并发原语
+arc-swap = "1"
+dashmap = "6"
+rand = "0.9"
+# 编码探测与解码（GBK/Big5/GB18030 书站必备）
+chardetng = "0.1"
+encoding_rs = "0.8"
+# 正则（净化 filterTxt / 分页结束判定 / 标题规范化，编译一次跨章节复用）
+regex = "1"
+# SSE 进度流组合子（chain/unfold）
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# /book-download 文件流（ReaderStream：tokio File → HTTP body）
+tokio-util = { version = "0.7", default-features = false, features = ["io"] }
+# 简繁转换（纯 Rust，OpenCC 词库 zstd 嵌入，懒加载：首次转换才解压词库）
+opencc-fmmseg = "0.11"
+# EPUB 输出（zip 容器 + content.opf/toc.ncx 生成）
+epub-builder = "0.7"
+# @js: 规则后处理（QuickJS 绑定，对应源项目 Javet/V8；按调用创建销毁 context，无常驻池）
+rquickjs = "0.9"
+# @java:base64.decode() DSL 步骤（对应源项目 JavaExecutor）
+base64 = "0.22"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+
+# 内存与体积优化（设计文档 §7 / linter.md 产物体积约束）
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+strip = true
+panic = "abort"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# 项目特定豁免：模块名与源项目 Java 包名对应（rule::Rule 等）
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+# 性能相关全 deny
+perf = { level = "deny", priority = -1 }
+# 内存敏感加严
+large_enum_variant = "deny"
+single_char_pattern = "deny"
+format_collect = "deny"

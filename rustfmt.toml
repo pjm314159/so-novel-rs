@@ -1,0 +1,8 @@
+edition = "2021"
+max_width = 110
+use_small_heuristics = "Max"
+# 以下两项为 nightly-only，CI 用 +nightly 全量执行，stable 本地自动忽略
+imports_granularity = "Module"
+group_imports = "StdExternalCrate"
+reorder_imports = true
+newline_style = "Unix"

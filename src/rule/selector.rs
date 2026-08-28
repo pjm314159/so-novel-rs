@@ -74,12 +74,150 @@ pub fn extract(html: &Html, expr: &str, base_uri: &str) -> Result<Option<String>
 /// # Errors
 /// 选择器非法时返回 [`SelectorError::InvalidCss`]；DSL 执行失败返回 [`SelectorError::Dsl`]。
 pub fn extract_html(html: &Html, expr: &str) -> Result<Option<String>, SelectorError> {
+    extract_html_with_filter(html, expr, "")
+}
+
+/// [`extract_html`] 的杂质预清理版本：在执行 DSL 前先移除 `filterTag` 命中的元素。
+///
+/// 典型场景 wxsy：正文 base64 编码于 `<script>` 中，同容器的 `h3`/`div` 杂质与
+/// 首段 base64 处于同一文本行，若先解码会因 `<` 非法字符失败；先删杂质再解码
+/// 则输入为纯 base64 行。对无 DSL 的规则，效果等价于渲染阶段的 `removeTags`（幂等）。
+///
+/// # Errors
+/// 同 [`extract_html`]。
+pub fn extract_html_with_filter(
+    html: &Html,
+    expr: &str,
+    filter_tag: &str,
+) -> Result<Option<String>, SelectorError> {
     let (css, _attr, steps) = parse_selector(expr);
     let Some(element) = select_first(html, &css)? else {
         return Ok(None);
     };
-    let raw = element.inner_html();
+    let mut raw = element.inner_html();
+    if !filter_tag.trim().is_empty() {
+        raw = remove_tags(&raw, filter_tag);
+    }
     Ok(Some(postprocess(&steps, raw)?))
+}
+
+/// 从 HTML 片段移除 `filterTag`（逗号分隔，如 `h3, div, p[style=font-size:12px;]`）命中的元素。
+///
+/// 成对标签用扫描器配对删除（支持嵌套）；void 标签（br/hr 等）用正则直接删自身。
+fn remove_tags(html: &str, filter_tag: &str) -> String {
+    let mut out = html.to_owned();
+    for token in filter_tag.split(',') {
+        let token = token.trim();
+        if token.is_empty() {
+            continue;
+        }
+        let (tag, attr_part) = match token.split_once('[') {
+            Some((t, a)) => (t.trim(), a),
+            None => (token, ""),
+        };
+        if tag.is_empty() {
+            continue;
+        }
+        if VOID_TAGS.contains(&tag) {
+            let tag_pat = regex::escape(tag);
+            let re = regex::Regex::new(&format!(r"(?is)<{tag_pat}\b[^>]*/?>")).expect("void 标签正则恒合法");
+            out = re.replace_all(&out, "").into_owned();
+        } else {
+            out = remove_paired_tags(&out, tag, attr_part);
+        }
+    }
+    out
+}
+
+/// void（空）元素集合：无结束标签，直接删除自身。
+const VOID_TAGS: &[&str] = &["br", "hr", "img", "input", "meta", "link", "source", "wbr"];
+
+/// 删除 `tag` 的全部成对元素（大小写不敏感、支持嵌套配对）。
+///
+/// `attr_part` 为 `[name=value]` 形态的属性约束原文；非空时仅删除属性匹配的开标签。
+/// 未闭合的孤立开标签原样保留（HTML 容错）。
+fn remove_paired_tags(input: &str, tag: &str, attr_part: &str) -> String {
+    let has_attr = attr_part.trim_matches(|c| c == '[' || c == ']').contains('=');
+    // 仅在确有属性约束时构建匹配正则；普通标签约束为 None（深度扫描恒计数）
+    let attr_re = if has_attr {
+        regex::Regex::new(&format!(
+            r#"(?i)\b{}\s*=\s*["']?{}["']?"#,
+            regex::escape(attr_part.trim_matches(|c| c == '[' || c == ']').split_once('=').map_or(tag, |(n, _)| n.trim())),
+            regex::escape(
+                attr_part.trim_matches(|c| c == '[' || c == ']').split_once('=').map_or("", |(_, v)| v.trim())
+            )
+            .replace(';', "")
+        ))
+        .ok()
+    } else {
+        None
+    };
+
+    let lower = input.to_lowercase();
+    let open = format!("<{}", tag.to_lowercase());
+    let close = format!("</{}>", tag.to_lowercase());
+    let is_tag_head = |b: Option<u8>| matches!(b, Some(b'>') | Some(b' ') | Some(b'\t') | Some(b'\n') | Some(b'\r') | Some(b'/'));
+
+    let mut out = String::with_capacity(input.len());
+    let mut cursor = 0usize;
+    while let Some(rel) = lower[cursor..].find(&open) {
+        let start = cursor + rel;
+        let head_end = lower[start..].find('>').map_or(lower.len(), |i| start + i + 1);
+        if !is_tag_head(lower.as_bytes().get(start + open.len()).copied()) {
+            // 伪开标签（如 <divx），跳过
+            out.push_str(&input[cursor..head_end.min(start + open.len() + 1)]);
+            cursor = head_end.min(start + open.len() + 1);
+            continue;
+        }
+        if has_attr && !attr_re.as_ref().map_or(true, |re| re.is_match(&lower[start..head_end])) {
+            // 属性约束不匹配：保留该元素，继续向后扫描
+            out.push_str(&input[cursor..head_end]);
+            cursor = head_end;
+            continue;
+        }
+        // 深度扫描找配对闭合（内层同标签计数）
+        let mut depth = 1usize;
+        let mut end = None;
+        let mut pos = head_end;
+        while pos < lower.len() {
+            let o = lower[pos..].find(&open).map_or(lower.len(), |i| pos + i);
+            let c = lower[pos..].find(&close).map_or(lower.len(), |i| pos + i);
+            if c == lower.len() && o == lower.len() {
+                break;
+            }
+            if o < c {
+                if is_tag_head(lower.as_bytes().get(o + open.len()).copied())
+                    && attr_re.as_ref().map_or(true, |re| {
+                        let head = lower[o..].find('>').map_or(lower.len(), |i| o + i + 1);
+                        re.is_match(&lower[o..head])
+                    })
+                {
+                    depth += 1;
+                }
+                pos = o + open.len();
+            } else {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(c + close.len());
+                    break;
+                }
+                pos = c + close.len();
+            }
+        }
+        match end {
+            Some(e) => {
+                out.push_str(&input[cursor..start]);
+                cursor = e;
+            }
+            // 未闭合：保留开标签头，从其后继续扫描
+            None => {
+                out.push_str(&input[cursor..head_end]);
+                cursor = head_end;
+            }
+        }
+    }
+    out.push_str(&input[cursor..]);
+    out
 }
 
 /// DSL 步骤执行（无步骤时原样返回）
@@ -354,5 +492,45 @@ mod tests {
         let els = select_all(&d, "/html").unwrap();
         assert_eq!(els.len(), 1);
         assert_eq!(els[0].value().name(), "html");
+    }
+
+    #[test]
+    fn remove_tags_deletes_paired_nested_and_attr_constrained() {
+        // 嵌套 div 自内向外全部删除
+        let out = remove_tags(r#"<h3>标题</h3>正文<div class="a">x<div class="b">y</div>z</div>尾"#, "h3, div");
+        assert_eq!(out, "正文尾");
+    }
+
+    #[test]
+    fn remove_tags_attr_constraint_keeps_other_elements() {
+        // p[style=...] 只删带该属性的 p，普通 p 保留
+        let input = r#"<p style="font-size:12px;">广告</p><p>正文段</p>"#;
+        let out = remove_tags(input, "p[style=font-size:12px;]");
+        assert_eq!(out, "<p>正文段</p>");
+    }
+
+    #[test]
+    fn remove_tags_deletes_void_elements() {
+        let out = remove_tags("第一行<br>第二行<br/>第三行<hr>", "br");
+        assert_eq!(out, "第一行第二行第三行<hr>");
+    }
+
+    #[test]
+    fn extract_html_with_filter_enables_base64_decode() {
+        // wxsy chapter.content 场景：杂质 h3/div 与 base64 同行，须先删再解码
+        let d = Html::parse_document(
+            r##"<html><body><div class="row-detail"><div><div>
+                <h3>第1章</h3><div class="read_btn"><a href="#">导航</a></div>
+                <script>document.writeln(qsbs.bb('5Lit5paH'));</script>
+                <script>document.writeln(qsbs.bb('aGVsbG8='));</script>
+                <p>请勿开启浏览器阅读模式</p>
+            </div></div></div></body></html>"##,
+        );
+        let expr = ".row-detail > div > div@js:r=r.replace(/<script>\\s*document\\.writeln\\(qsbs\\.bb\\('([^']+)'\\)\\);\\s*<\\/script>/g,function(a,b){return b});@java:base64.decode()";
+        let v = extract_html_with_filter(&d, expr, "h3, div, p[style=font-size:12px;]")
+            .unwrap()
+            .expect("内容元素应存在");
+        // JS 将 script 标签替换为裸 base64 → 解码后直接拼接（与源项目一致，无 <p> 包裹）
+        assert_eq!(v, "中文hello");
     }
 }

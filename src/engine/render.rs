@@ -157,11 +157,15 @@ fn clear_all_attributes(html: &str) -> String {
 }
 
 /// 删除 CSS 选择器匹配的标签（逗号分隔多选择器，对应 `HtmlUtils.removeTags`）。
+///
+/// 规则文件中的属性选择器常为无引号形态（如 `p[style=font-size:12px;]`，jsoup 容忍），
+/// cssparser 严格要求引号：解析前为无引号属性值补全引号。
 fn remove_tags(html: &str, css_query: &str) -> String {
     if html.is_empty() || css_query.trim().is_empty() {
         return html.to_owned();
     }
-    let Ok(selector) = CssSelector::parse(css_query) else {
+    let normalized = quote_unquoted_attr_values(css_query);
+    let Ok(selector) = CssSelector::parse(&normalized) else {
         tracing::warn!(css_query, "filterTag 选择器非法，跳过标签删除");
         return html.to_owned();
     };
@@ -174,6 +178,14 @@ fn remove_tags(html: &str, css_query: &str) -> String {
         }
     }
     body_inner_html(&doc)
+}
+
+/// 为 CSS 属性选择器的无引号值补全引号：`p[style=font-size:12px;]` → `p[style="font-size:12px;"]`。
+/// 已带引号的值不匹配（值字符类排除引号），保持原样。
+fn quote_unquoted_attr_values(css_query: &str) -> String {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r#"\[([-\w]+)=([^\]\["]+)\]"#).expect("常量正则恒合法"));
+    re.replace_all(css_query, r#"[$1="$2"]"#).into_owned()
 }
 
 /// 非 `<p>` 闭合标签改名为 `<p>`（对应 `<(?!p\b)([^>]+)>(.*?)</\1>` → `<p>$2</p>`）。
@@ -337,6 +349,19 @@ mod tests {
         let out = render_txt("第1章", "<p>第一段</p><p>第二段</p>");
         assert!(out.starts_with("第1章\n\n"));
         assert!(out.contains("\u{3000}\u{3000}第一段\n"));
+    }
+
+    #[test]
+    fn remove_tags_quotes_unquoted_attr_values() {
+        // 无引号属性值（jsoup 容忍形态）应补引号后正常解析删除，不再告警跳过
+        let out = remove_tags(
+            r#"<p style="font-size:12px;">广告</p><p>正文</p>"#,
+            "h3, div, p[style=font-size:12px;]",
+        );
+        assert_eq!(out, "<p>正文</p>");
+        // 已带引号的写法不受影响
+        let out = remove_tags(r#"<p style="a">x</p>"#, r#"p[style="a"]"#);
+        assert_eq!(out, "");
     }
 
     #[test]

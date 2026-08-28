@@ -77,7 +77,9 @@ async fn fetch_content(
 /// 正文选择器无匹配（源项目断言语义）时返回错误。
 pub(crate) fn extract_page_content(r: &ChapterRule, body: &str, url: &str) -> Result<String, BoxError> {
     let doc = scraper::Html::parse_document(body);
-    let content = selector::extract_html(&doc, &r.content).ok().flatten().unwrap_or_default();
+    // DSL 前先删 filterTag 杂质（如 wxsy：h3/div 与 base64 同行会导致解码失败）
+    let content =
+        selector::extract_html_with_filter(&doc, &r.content, &r.filter_tag).ok().flatten().unwrap_or_default();
     if content.is_empty() {
         return Err(format!("正文内容为空: {url}").into());
     }
@@ -100,7 +102,10 @@ async fn fetch_paginated_content(
         // 同步块：提取正文 + 下一页候选链接与按钮文本
         let (page_content, candidate, next_text) = {
             let doc = scraper::Html::parse_document(&body);
-            let page_content = selector::extract_html(&doc, &r.content).ok().flatten().unwrap_or_default();
+            let page_content = selector::extract_html_with_filter(&doc, &r.content, &r.filter_tag)
+                .ok()
+                .flatten()
+                .unwrap_or_default();
             let next_els = selector::select_all(&doc, &r.next_page).unwrap_or_default();
             let candidate = if !r.next_page_in_js.is_empty() {
                 // 下一页链接位于脚本中（对应源项目 resolveNextUrl 的 JS 分支）

@@ -24,6 +24,12 @@ fn test_state() -> Arc<AppState> {
         jobs: Arc::new(so_novel_rs::engine::JobRegistry::default()),
         http,
         static_dir: Path::new("static").to_path_buf(),
+        shutdown: {
+            // 发送端必须保活（forget 泄漏）：drop 会立刻关闭 SSE 流
+            let (tx, rx) = tokio::sync::watch::channel(false);
+            std::mem::forget(tx);
+            rx
+        },
     })
 }
 
@@ -50,6 +56,12 @@ fn offline_state() -> Arc<AppState> {
         jobs: Arc::new(so_novel_rs::engine::JobRegistry::default()),
         http,
         static_dir: Path::new("static").to_path_buf(),
+        shutdown: {
+            // 发送端必须保活（forget 泄漏）：drop 会立刻关闭 SSE 流
+            let (tx, rx) = tokio::sync::watch::channel(false);
+            std::mem::forget(tx);
+            rx
+        },
     })
 }
 
@@ -66,6 +78,12 @@ fn state_with_download_path(download_path: &Path) -> Arc<AppState> {
         jobs: Arc::new(so_novel_rs::engine::JobRegistry::default()),
         http,
         static_dir: Path::new("static").to_path_buf(),
+        shutdown: {
+            // 发送端必须保活（forget 泄漏）：drop 会立刻关闭 SSE 流
+            let (tx, rx) = tokio::sync::watch::channel(false);
+            std::mem::forget(tx);
+            rx
+        },
     })
 }
 

@@ -88,18 +88,29 @@ fn run_js(code: &str, input: &str) -> Result<String, String> {
 /// 执行 `@java:` 内建步骤（源项目 `JavaExecutor`：仅两个已知操作，未知原样返回）。
 fn run_java(code: &str, input: &str) -> Result<String, String> {
     if code == "base64.decode()" {
-        // 按行切分 → 过滤空行 → 分别解码 → 拼接（与源项目逐行 Base64::decodeStr 一致）
+        // 按行切分 → 过滤空行 → 分别解码 → 拼接（与源项目逐行 Base64::decodeStr 一致）。
+        // 额外兼容：同一行内多段 base64 连排（如 html5ever 序列化后 <script> 间无换行，
+        // 前段的 `==` padding 落在行中间）时按 padding 边界分段解码。
         use base64::Engine as _;
+        let token = regex::Regex::new(r"[A-Za-z0-9+/]+={0,2}").expect("常量正则恒合法");
         let mut out = String::new();
         for line in input.lines() {
             let line = line.trim();
             if line.is_empty() {
                 continue;
             }
-            let decoded = base64::engine::general_purpose::STANDARD
-                .decode(line)
-                .map_err(|e| format!("base64 解码失败: {e}"))?;
-            out.push_str(&String::from_utf8_lossy(&decoded));
+            for seg in token.find_iter(line) {
+                let s = seg.as_str();
+                // 长度非 4 倍数的 token 是杂质片段（如残留标签字母 `p`），跳过；
+                // 有效正文段均为标准 padded base64（长度为 4 的倍数）
+                if s.len() % 4 != 0 {
+                    continue;
+                }
+                // 解码失败的段同样视为杂质跳过（对齐源项目宽松解码的实际效果）
+                if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(s) {
+                    out.push_str(&String::from_utf8_lossy(&decoded));
+                }
+            }
         }
         return Ok(out);
     }
@@ -187,8 +198,18 @@ mod tests {
     }
 
     #[test]
-    fn run_java_base64_invalid_returns_err() {
-        assert!(run_java("base64.decode()", "!!!not-base64!!!").is_err());
+    fn run_java_base64_decode_joined_segments_with_junk() {
+        // 同一行多段 base64 连排（html5ever 序列化后 <script> 间无换行）+ 残留标签字母杂质
+        // （wxsy 场景：`<p>请勿开启浏览器阅读模式</p>` 明文标签混在 base64 流之后）
+        let out = run_java("base64.decode()", "aGVsbG8=d29ybGQ=<p>x</p>").unwrap();
+        assert_eq!(out, "helloworld");
+    }
+
+    #[test]
+    fn run_java_base64_all_invalid_yields_empty() {
+        // 全部 token 无效 → 空输出，由上层"正文内容为空"兜底报错
+        let out = run_java("base64.decode()", "!!!not-base64!!!").unwrap();
+        assert_eq!(out, "");
     }
 
     #[test]

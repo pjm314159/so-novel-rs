@@ -31,6 +31,9 @@ pub struct AppState {
     pub http: HttpClients,
     /// 静态资源目录（static/）
     pub static_dir: PathBuf,
+    /// 停机通知（true = 收到 Ctrl-C）：SSE 长连接据此结束，
+    /// 否则 graceful shutdown 会被在途 SSE 无限期挂起
+    pub shutdown: tokio::sync::watch::Receiver<bool>,
 }
 
 /// 构建 Router（所有 handler 挂载于此）

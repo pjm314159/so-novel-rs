@@ -83,8 +83,6 @@
           <option value="">跟随服务器配置</option>
           <option value="epub">EPUB</option>
           <option value="txt">TXT</option>
-          <option value="html">HTML</option>
-          <option value="pdf">PDF</option>
         </select>
       </div>
       <div class="flex flex-col gap-1.5 min-w-0">
@@ -370,14 +368,6 @@
   <button @click="handleDownloadToServer(dropdownItem, 'txt')"
           class="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50"
           x-show="defaultExtLabel !== 'TXT'">TXT
-  </button>
-  <button @click="handleDownloadToServer(dropdownItem, 'html')"
-          class="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50"
-          x-show="defaultExtLabel !== 'HTML'">HTML
-  </button>
-  <button @click="handleDownloadToServer(dropdownItem, 'pdf')"
-          class="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50"
-          x-show="defaultExtLabel !== 'PDF'">PDF
   </button>
 </div>
 
@@ -719,6 +709,34 @@
         }
       },
 
+      // 专用 SSE 订阅指定任务：每章快照驱动进度条，终态 done → resolve，error → reject
+      waitForJob(jobId) {
+        return new Promise((resolve, reject) => {
+          const es = new EventSource(`/download-progress?id=${encodeURIComponent(jobId)}`)
+          es.onmessage = (e) => {
+            try {
+              const data = JSON.parse(e.data)
+              if (data.type === 'download-progress') {
+                this.downloadCurrent = data.index
+                this.downloadTotal = data.total
+              }
+            } catch (_) {}
+          }
+          es.addEventListener('done', (e) => {
+            es.close()
+            try { resolve(JSON.parse(e.data)) } catch (_) { resolve({}) }
+          })
+          // named "error" 与原生网络错误同名：带 data 的才是服务端失败终态
+          es.addEventListener('error', (e) => {
+            if (!e.data) return // 网络中断，浏览器按 retry 自动重连
+            es.close()
+            let msg = '下载失败'
+            try { msg = JSON.parse(e.data).failedReason || msg } catch (_) {}
+            reject(new Error(msg))
+          })
+        })
+      },
+
       async handleDownloadToServer(item, format) {
         this.closeDownloadMenu()
         if (!item) {
@@ -739,11 +757,26 @@
             const data = await resp.json()
             throw new Error(data.message || '未知错误')
           }
+          // 受理即返回：/book-fetch 创建后台任务，此处拿到 jobId 等待终态；
+          // 弹窗保持显示，进度条由全局 SSE（initSSE）驱动
+          const accepted = await resp.json()
+          if (accepted.code !== 200 || !accepted.data || !accepted.data.jobId) {
+            throw new Error(accepted.message || '任务受理失败')
+          }
+          this.tipText = '正在下载章节...'
+          const result = await this.waitForJob(accepted.data.jobId)
           await this.fetchLocalBooks()
-          location.href = `/book-download?filename=${encodeURIComponent(this.latestFileName)}`
+          const name = result.filename || this.latestFileName
+          if (name) {
+            this.tipText = '下载完成，正在保存文件...'
+            setTimeout(() => this.hideTip(), 800)
+            location.href = `/book-download?filename=${encodeURIComponent(name)}`
+          } else {
+            this.hideTip()
+            alert('下载完成，但未找到产物文件，请到「已下书籍」查看')
+          }
         } catch (error) {
           alert(`下载书籍到服务器失败: ${error.message}`)
-        } finally {
           this.hideTip()
         }
       },
@@ -909,7 +942,7 @@
         }
         const rect = event.currentTarget.getBoundingClientRect()
         const menuWidth = 144
-        const menuHeight = 200
+        const menuHeight = 140
         let top = rect.bottom + 6
         if (top + menuHeight > window.innerHeight - 8) top = rect.top - menuHeight - 6
         let left = rect.right - menuWidth

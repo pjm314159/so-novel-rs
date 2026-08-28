@@ -46,6 +46,12 @@ pub async fn download_progress(
         //   浏览器 EventSource 自动重连，造成"连接异常/成功"循环提示）
         None => Box::pin(futures_util::stream::pending::<Result<Event, Infallible>>()),
     };
+    // 停机时立即结束 SSE 流：pending/长连接会无限期阻塞 graceful shutdown
+    let mut shutdown = state.shutdown.clone();
+    let stream = Box::pin(stream.take_until(async move {
+        // 发送端随 main 结束 drop 时 Closed：进程本就在退出，忽略即可
+        let _ = shutdown.wait_for(|fired| *fired).await;
+    }));
     Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text("keep-alive"))
 }
 

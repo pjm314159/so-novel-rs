@@ -182,8 +182,10 @@ fn next_page_url(doc: &scraper::Html, next_page: &str, base_uri: &str) -> Option
 
 /// 解析单页目录条目（对应源项目 `TocParser.extractElements` + `addChapter`）。
 ///
-/// `toc.list` 非空时先取容器内部 HTML 再解析（源项目对内层文档不设 baseUri，
-/// 相对链接不补全，与 Jsoup absUrl 空基座行为一致）；否则直接在页面文档上选条目。
+/// `toc.list` 非空时先取容器内部 HTML（执行 `@js:` 预处理）再解析条目；
+/// 内层文档继承外层 `base_uri`：item 的 `href` 通常为相对路径
+/// （如 wxsy 的 `/novel/x/read_y.html`），不绝对化则下载器无法请求。
+/// `list` 为空时直接在页面文档上选条目。
 fn extract_items(body: &str, r: &TocRule, base_uri: &str) -> Vec<RawItem> {
     let doc = scraper::Html::parse_document(body);
     let to_items = |elements: Vec<scraper::ElementRef<'_>>, item_base: &str| {
@@ -200,7 +202,7 @@ fn extract_items(body: &str, r: &TocRule, base_uri: &str) -> Vec<RawItem> {
     } else {
         let toc_html = selector::extract_html(&doc, &r.list).ok().flatten().unwrap_or_default();
         let inner = scraper::Html::parse_document(&toc_html);
-        to_items(selector::select_all(&inner, &r.item).unwrap_or_default(), "")
+        to_items(selector::select_all(&inner, &r.item).unwrap_or_default(), base_uri)
     }
 }
 
@@ -271,15 +273,15 @@ mod tests {
     }
 
     #[test]
-    fn extract_items_list_container_does_not_absolutize_relative() {
+    fn extract_items_list_container_absolutizes_with_outer_base() {
         let r = TocRule { list: "#list".into(), item: "a".into(), ..Default::default() };
         let items = extract_items(
             r#"<html><body><div id="list"><a href="/rel.html">第1章</a><a href="https://x.cc/abs.html">第2章</a></div></body></html>"#,
             &r,
             "https://x.cc/book/",
         );
-        // 内层文档无 baseUri：相对链接不补全（与源项目一致），绝对链接保留
-        assert_eq!(items[0].url, "/rel.html");
+        // 内层文档继承外层 base_uri：相对链接按外层补全（wxsy 目录即此形态），绝对链接保留
+        assert_eq!(items[0].url, "https://x.cc/rel.html");
         assert_eq!(items[1].url, "https://x.cc/abs.html");
     }
 

@@ -60,12 +60,14 @@ fn main() -> Result<(), BoxError> {
     let http = so_novel_rs::util::http::HttpClients::new(&config.proxy)
         .map_err(|e| -> BoxError { format!("HTTP 客户端构建失败: {e}").into() })?;
 
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let state = Arc::new(AppState {
         config,
         rules,
         jobs: Arc::new(JobRegistry::default()),
         http,
         static_dir: Path::new("static").to_path_buf(),
+        shutdown: shutdown_rx,
     });
 
     // 单进程单端口，仅绑定本机（单人服务）
@@ -82,16 +84,19 @@ fn main() -> Result<(), BoxError> {
             .map_err(|e| -> BoxError { format!("端口 {port} 绑定失败: {e}").into() })?;
         tracing::info!(%addr, "so-novel-rs 启动完成，浏览器访问 http://{addr}/");
         axum::serve(listener, app)
-            .with_graceful_shutdown(shutdown_signal())
+            .with_graceful_shutdown(shutdown_signal(shutdown_tx))
             .await
             .map_err(|e| -> BoxError { format!("HTTP 服务异常退出: {e}").into() })
     })
 }
 
-/// Ctrl-C 优雅停机（linter.md §5.5：停止接收新请求，完成进行中的响应）
-async fn shutdown_signal() {
+/// Ctrl-C 优雅停机（linter.md §5.5：停止接收新请求，完成进行中的响应）。
+///
+/// 通知 SSE 长连接随信号结束：否则在途 SSE 会无限期阻塞 graceful shutdown。
+async fn shutdown_signal(shutdown: tokio::sync::watch::Sender<bool>) {
     let _ = tokio::signal::ctrl_c().await;
     tracing::info!("收到停机信号，正在优雅退出…");
+    let _ = shutdown.send(true);
 }
 
 /// 清理超过 N 天的日志文件（按修改时间判定，启动时执行一次）。

@@ -134,7 +134,7 @@ async fn run(env: &JobEnv, job_id: &str, book_url: &str) -> Result<(), BoxError>
     registry.update(job_id, |s| s.phase = super::Phase::Merging);
     let output_name = merge::merge_and_finalize(config, &client, &book, &dir).await?;
     registry.update(job_id, |s| s.filename = Some(output_name.clone()));
-    let failed = registry.get(job_id).map(|s| s.failed).unwrap_or(0);
+    let failed = registry.get(job_id).map_or(0, |s| s.failed);
     tracing::info!(job = job_id, file = %output_name, failed, "下载完成");
     Ok(())
 }

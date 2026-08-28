@@ -164,9 +164,7 @@ fn remove_paired_tags(input: &str, tag: &str, attr_part: &str) -> String {
     let lower = input.to_lowercase();
     let open = format!("<{}", tag.to_lowercase());
     let close = format!("</{}>", tag.to_lowercase());
-    let is_tag_head = |b: Option<u8>| {
-        matches!(b, Some(b'>') | Some(b' ') | Some(b'\t') | Some(b'\n') | Some(b'\r') | Some(b'/'))
-    };
+    let is_tag_head = |b: Option<u8>| matches!(b, Some(b'>' | b' ' | b'\t' | b'\n' | b'\r' | b'/'));
 
     let mut out = String::with_capacity(input.len());
     let mut cursor = 0usize;
@@ -179,7 +177,7 @@ fn remove_paired_tags(input: &str, tag: &str, attr_part: &str) -> String {
             cursor = head_end.min(start + open.len() + 1);
             continue;
         }
-        if has_attr && !attr_re.as_ref().map_or(true, |re| re.is_match(&lower[start..head_end])) {
+        if has_attr && !attr_re.as_ref().is_none_or(|re| re.is_match(&lower[start..head_end])) {
             // 属性约束不匹配：保留该元素，继续向后扫描
             out.push_str(&input[cursor..head_end]);
             cursor = head_end;
@@ -197,7 +195,7 @@ fn remove_paired_tags(input: &str, tag: &str, attr_part: &str) -> String {
             }
             if o < c {
                 if is_tag_head(lower.as_bytes().get(o + open.len()).copied())
-                    && attr_re.as_ref().map_or(true, |re| {
+                    && attr_re.as_ref().is_none_or(|re| {
                         let head = lower[o..].find('>').map_or(lower.len(), |i| o + i + 1);
                         re.is_match(&lower[o..head])
                     })
@@ -214,16 +212,13 @@ fn remove_paired_tags(input: &str, tag: &str, attr_part: &str) -> String {
                 pos = c + close.len();
             }
         }
-        match end {
-            Some(e) => {
-                out.push_str(&input[cursor..start]);
-                cursor = e;
-            }
+        if let Some(e) = end {
+            out.push_str(&input[cursor..start]);
+            cursor = e;
+        } else {
             // 未闭合：保留开标签头，从其后继续扫描
-            None => {
-                out.push_str(&input[cursor..head_end]);
-                cursor = head_end;
-            }
+            out.push_str(&input[cursor..head_end]);
+            cursor = head_end;
         }
     }
     out.push_str(&input[cursor..]);

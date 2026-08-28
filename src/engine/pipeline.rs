@@ -11,7 +11,9 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
-use super::{book, chapter, crawl_params, lang, merge, render, toc, BoxError, JobId, JobRegistry};
+use super::{
+    book, chapter, crawl_params, lang, merge, render, toc, BoxError, Chapter, CrawlParams, JobId, JobRegistry,
+};
 use crate::config::AppConfig;
 use crate::rule::Rule;
 use crate::util::file::sanitize_file_name;
@@ -82,75 +84,20 @@ async fn run(env: &JobEnv, job_id: &str, book_url: &str) -> Result<(), BoxError>
     let digit_count = toc.len().to_string().len();
     // txt 落盘 .txt；epub 转换前格式为 html（对应源项目 generateChapterPath）
     let file_ext = if ext == "epub" { "html" } else { "txt" };
-
-    let sem = Arc::new(Semaphore::new(max_concurrent));
-    // fail-fast：任一章最终失败后置位，排队中的章节任务直接跳过不再发请求
-    let aborted = Arc::new(AtomicBool::new(false));
-    let mut set: JoinSet<()> = JoinSet::new();
-    for ch in toc {
-        let permit = sem.clone().acquire_owned();
-        let client = client.clone();
-        let rule = rule.clone();
-        let params = params.clone();
-        let cf_bypass = config.global.cf_bypass.clone();
-        let registry = Arc::clone(registry);
-        let job_id = job_id.to_owned();
-        let dir = dir.clone();
-        let ext = ext.to_owned();
-        let file_ext = file_ext.to_owned();
-        let aborted = Arc::clone(&aborted);
-        set.spawn(async move {
-            let _permit = permit.await.expect("信号灯在任务运行期间不会被关闭");
-            if aborted.load(Ordering::Relaxed) {
-                // 已有失败章节：静默跳过（计 failed，不重复刷日志）
-                registry.update(&job_id, |s| s.failed += 1);
-                return;
-            }
-            match chapter::fetch_chapter(&client, &rule, &params, &cf_bypass, &ch.url, &ch.title).await {
-                Ok(raw) => {
-                    let mut rendered = render::render_chapter(&rule.chapter, &ext, &ch.title, &raw);
-                    // 简繁转换（对应源项目 ChapterParser 的 ChineseConverter.convert）
-                    if let Some(c) = conversion {
-                        lang::convert_chapter_fields(&mut rendered.title, &mut rendered.content, c);
-                    }
-                    let path = dir.join(format!(
-                        "{:0width$}_{}.{}",
-                        ch.index,
-                        sanitize_file_name(&rendered.title),
-                        file_ext,
-                        width = digit_count,
-                    ));
-                    if let Err(e) = tokio::fs::write(&path, rendered.content.as_bytes()).await {
-                        tracing::error!(chapter = %ch.title, error = %e, "章节缓存落盘失败");
-                        aborted.store(true, Ordering::Relaxed);
-                        registry.update(&job_id, |s| s.failed += 1);
-                        return;
-                    }
-                    registry.update(&job_id, |s| {
-                        s.done += 1;
-                        s.current.clone_from(&rendered.title);
-                    });
-                }
-                Err(e) => {
-                    // 仅首个失败记录详细错误，随后中止剩余章节请求
-                    if !aborted.swap(true, Ordering::Relaxed) {
-                        tracing::error!(
-                            chapter = %ch.title, url = %ch.url, error = %e,
-                            "章节下载失败（含重试），中止剩余章节请求"
-                        );
-                    }
-                    registry.update(&job_id, |s| s.failed += 1);
-                }
-            }
-        });
-    }
-    while let Some(res) = set.join_next().await {
-        if res.is_err() {
-            // 任务 panic：章节静默缺失，必须计入 failed（否则 failed=0 假象）
-            aborted.store(true, Ordering::Relaxed);
-            registry.update(job_id, |s| s.failed += 1);
-        }
-    }
+    let ctx = Arc::new(ChapterCtx {
+        client: client.clone(),
+        rule: rule.clone(),
+        params,
+        cf_bypass: config.global.cf_bypass.clone(),
+        registry: Arc::clone(registry),
+        job_id: job_id.to_owned(),
+        dir: dir.clone(),
+        ext: ext.to_owned(),
+        file_ext,
+        digit_count,
+        conversion,
+    });
+    download_chapters(ctx, toc, max_concurrent).await;
 
     // 4. 合并输出（Phase::Merging → Done）
     let failed = registry.get(job_id).map_or(0, |s| s.failed);
@@ -163,4 +110,96 @@ async fn run(env: &JobEnv, job_id: &str, book_url: &str) -> Result<(), BoxError>
     registry.update(job_id, |s| s.filename = Some(output_name.clone()));
     tracing::info!(job = job_id, file = %output_name, "下载完成");
     Ok(())
+}
+
+/// 章节任务共享上下文（owned 字段便于 `spawn`，Arc 共享）
+struct ChapterCtx {
+    client: reqwest::Client,
+    rule: Rule,
+    params: CrawlParams,
+    cf_bypass: String,
+    registry: Arc<JobRegistry>,
+    job_id: JobId,
+    dir: std::path::PathBuf,
+    ext: String,
+    file_ext: &'static str,
+    digit_count: usize,
+    conversion: Option<lang::Conversion>,
+}
+
+/// 章节并发下载（fail-fast：任一章最终失败即置位中止标志，排队任务静默跳过不再发请求；
+/// panic 任务计入 failed）。失败数实时累加进 `registry.failed`。
+async fn download_chapters(ctx: Arc<ChapterCtx>, toc: Vec<Chapter>, max_concurrent: usize) {
+    let sem = Arc::new(Semaphore::new(max_concurrent));
+    let aborted = Arc::new(AtomicBool::new(false));
+    let mut set: JoinSet<()> = JoinSet::new();
+    for ch in toc {
+        let permit = sem.clone().acquire_owned();
+        let ctx = Arc::clone(&ctx);
+        let aborted = Arc::clone(&aborted);
+        set.spawn(async move {
+            let _permit = permit.await.expect("信号灯在任务运行期间不会被关闭");
+            if aborted.load(Ordering::Relaxed) {
+                // 已有失败章节：静默跳过（计 failed，不重复刷日志）
+                ctx.registry.update(&ctx.job_id, |s| s.failed += 1);
+                return;
+            }
+            match chapter::fetch_chapter(
+                &ctx.client,
+                &ctx.rule,
+                &ctx.params,
+                &ctx.cf_bypass,
+                &ch.url,
+                &ch.title,
+            )
+            .await
+            {
+                Ok(raw) => {
+                    let mut rendered = render::render_chapter(&ctx.rule.chapter, &ctx.ext, &ch.title, &raw);
+                    // 简繁转换（对应源项目 ChapterParser 的 ChineseConverter.convert）
+                    if let Some(c) = ctx.conversion {
+                        lang::convert_chapter_fields(&mut rendered.title, &mut rendered.content, c);
+                    }
+                    let path = ctx.dir.join(format!(
+                        "{:0width$}_{}.{}",
+                        ch.index,
+                        sanitize_file_name(&rendered.title),
+                        ctx.file_ext,
+                        width = ctx.digit_count,
+                    ));
+                    if let Err(e) = tokio::fs::write(&path, rendered.content.as_bytes()).await {
+                        tracing::error!(chapter = %ch.title, error = %e, "章节缓存落盘失败");
+                        aborted.store(true, Ordering::Relaxed);
+                        ctx.registry.update(&ctx.job_id, |s| s.failed += 1);
+                        return;
+                    }
+                    ctx.registry.update(&ctx.job_id, |s| {
+                        s.done += 1;
+                        s.current.clone_from(&rendered.title);
+                    });
+                }
+                Err(e) => {
+                    // 仅首个失败记录详细错误，随后中止剩余章节请求
+                    if !aborted.swap(true, Ordering::Relaxed) {
+                        tracing::error!(
+                            chapter = %ch.title, url = %ch.url, error = %e,
+                            "章节下载失败（含重试），中止剩余章节请求"
+                        );
+                    }
+                    ctx.registry.update(&ctx.job_id, |s| s.failed += 1);
+                }
+            }
+        });
+    }
+    let mut panicked = 0u32;
+    while let Some(res) = set.join_next().await {
+        if res.is_err() {
+            // 任务 panic：章节静默缺失，必须计入 failed（否则 failed=0 假象）
+            aborted.store(true, Ordering::Relaxed);
+            panicked += 1;
+        }
+    }
+    if panicked > 0 {
+        ctx.registry.update(&ctx.job_id, |s| s.failed += panicked);
+    }
 }

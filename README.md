@@ -1,133 +1,131 @@
 # so-novel-rs
 
-[so-novel](https://github.com/freeok/so-novel) 的 Rust 重写版：多书源小说搜索与下载 Web 服务。
+English | [简体中文](./README.zh-CN.md)
 
-单文件二进制、无 JRE 依赖、空闲内存 ≤ 15MB（源项目 JVM 常驻 300MB+），与源项目**完全共用同一套书源规则文件**。
+A Rust rewrite of [so-novel](https://github.com/freeok/so-novel): a multi-source novel search and download web service.
 
-## 特性
+Ships as a single self-contained binary with no JRE dependency, uses **≤ 15MB** idle memory (the original JVM-based project idles at 300MB+), and **shares exactly the same book-source rule files** as the original project.
 
-- **聚合搜索**：并发查询全部书源，合并去重、低相似度过滤、搜索建议（`/suggestion`）
-- **完整下载流水线**：详情 → 目录（分页/倒序）→ 章节并发抓取（限速抖动 + 失败重试 + 分页正文拼接）→ 正文净化 → 简繁转换
-- **多任务并发**：`max_jobs` 可配置（默认 3），每 Job 独立限速与进度，超限返回 409
-- **SSE 实时进度**：每章推送一次，支持终态回放（刷新页面不断流）
-- **输出格式**：txt（可选 GBK 编码）/ epub（含封面与目录）
-- **本地书架**：已下载列表、文件下载、删除
-- **规则引擎**：CSS 选择器 + `@js:`（QuickJS）/ `@java:` 内建操作，与源项目 main.json 100% 兼容
-- **规则热更新**：`/rules/update` 在线拉取最新规则（支持 gh-proxy 加速），校验 + 原子写 + 无重启热重载
-- **Cloudflare 绕过**：对接外部 cf-bypass 服务（与源项目一致）
-- **日志**：stderr + 按日滚动文件双输出，启动时自动清理过期日志
-- **编码探测**：GBK / GB18030 / Big5 书站自动识别
+## Features
 
-## 快速开始
+- **Aggregated search**: queries all book sources concurrently, then merges and de-duplicates results, filters low-similarity matches, and provides suggestions (`/suggestion`)
+- **Full download pipeline**: detail → table of contents (paged / reversed) → concurrent chapter fetching (rate-limit jitter + retry on failure + paged content stitching) → content sanitization → Simplified/Traditional Chinese conversion
+- **Concurrent jobs**: configurable `max_jobs` (default 3), each job has its own rate limit and progress; returns 409 when the limit is exceeded
+- **Real-time SSE progress**: one event per chapter, with terminal-state replay (a page refresh does not break the stream)
+- **Output formats**: txt (optional GBK encoding) / epub (with cover and TOC)
+- **Local bookshelf**: list, download, and delete downloaded files
+- **Rule engine**: CSS selectors plus `@js:` (QuickJS) / `@java:` built-in operations — 100% compatible with the original project's `main.json`
+- **Hot rule update**: `/rules/update` pulls the latest rules online (gh-proxy acceleration supported), validates them, writes atomically, and hot-reloads without a restart
+- **Cloudflare bypass**: integrates with an external cf-bypass service (same as the original project)
+- **Logging**: dual output to stderr and a daily-rotating file, with expired logs cleaned up on startup
+- **Encoding detection**: automatic detection for GBK / GB18030 / Big5 sites
 
-### 方式一：下载预编译二进制
+## Quick Start
 
-从 [Releases](../../releases) 下载对应平台的压缩包，解压后运行：
+### Option 1: Download a prebuilt binary
+
+Grab the archive for your platform from [Releases](../../releases), extract it, and run:
 
 ```bash
-./so-novel-rs          # Windows 为 so-novel-rs.exe
+./so-novel-rs          # so-novel-rs.exe on Windows
 ```
 
-首次启动自动生成默认 `config.toml`，浏览器访问 <http://127.0.0.1:7765/> 即可使用。
+A default `config.toml` is generated on first startup. Open <http://127.0.0.1:7765/> in your browser to get started.
 
-### 方式二：从源码构建
+### Option 2: Build from source
 
-需要 Rust 1.85+（见 [rust-toolchain.toml](rust-toolchain.toml)）：
+Requires Rust 1.85+ (see [rust-toolchain.toml](rust-toolchain.toml)):
 
 ```bash
 cargo build --release
 ```
 
-运行时依赖工作目录下的 `rules/`（书源规则）与 `static/`（前端页面），仓库已自带。
+At runtime it expects `rules/` (book-source rules) and `static/` (frontend pages) in the working directory; both are included in this repository.
 
-## 配置
+## Configuration
 
-`config.toml`（首次启动自动生成，修改后重启生效）：
+`config.toml` (generated on first startup, changes take effect after a restart):
 
 ```toml
 [download]
-download_path = "downloads"     # 下载路径
-extname = "epub"                # 输出格式：txt | epub
-txt_encoding = ""               # 可设 "GBK" 兼容旧设备（默认 UTF-8）
-preserve_chapter_cache = false  # 下载完成后保留章节缓存目录
+download_path = "downloads"     # output directory
+extname = "epub"                # output format: txt | epub
+txt_encoding = ""               # set to "GBK" for legacy devices (default UTF-8)
+preserve_chapter_cache = false  # keep the chapter cache directory after download
 
 [source]
-language = ""                   # zh-CN | zh-TW | zh-Hant（空 = 跟随源站）
-active_rules = "main.json"      # 激活规则文件
-search_limit = 30               # 每书源搜索结果条数上限
+language = ""                   # zh-CN | zh-TW | zh-Hant (empty = follow source site)
+active_rules = "main.json"      # active rule file
+search_limit = 30               # max search results per book source
 
 [crawl]
-max_jobs = 3                    # 全局最大同时下载任务数
-concurrency = 50                # 每个 Job 的章节并发上限
-min_interval = 200              # 请求最小间隔 (ms)
-max_interval = 400              # 请求最大间隔 (ms)
-max_retries = 3                 # 失败重试次数
+max_jobs = 3                    # global max concurrent download jobs
+concurrency = 50                # max chapter concurrency per job
+min_interval = 200              # minimum request interval (ms)
+max_interval = 400              # maximum request interval (ms)
+max_retries = 3                 # retry count on failure
 
 [web]
 port = 7765
 
 [global]
-cf_bypass = ""                  # Cloudflare 绕过服务地址
-gh_proxy = ""                   # GitHub 加速代理（规则更新用）
+cf_bypass = ""                  # Cloudflare bypass service URL
+gh_proxy = ""                   # GitHub acceleration proxy (for rule updates)
 ```
 
-完整配置项见 [config.rs](src/config.rs)。环境变量 `SN_` 前缀可覆盖任意配置（如 `SN_WEB_PORT=8080`）。
+See [config.rs](src/config.rs) for the full list of options. Any option can be overridden with a `SN_`-prefixed environment variable (e.g. `SN_WEB_PORT=8080`).
 
 ## API
 
-所有 JSON 响应统一 `{code, message, data}` 包装。
+All JSON responses are wrapped uniformly as `{code, message, data}`.
 
-| 路径 | 说明 |
+| Path | Description |
 | --- | --- |
-| `GET /` | Web UI（静态页） |
-| `GET /config` | 运行配置（只读） |
-| `GET /search/aggregated?kw=` | 聚合搜索 |
-| `GET /suggestion?kw=` | 搜索建议词 |
-| `GET /book-fetch?url=&format=` | 创建下载任务，返回 `{jobId}`（202） |
-| `GET /download-progress?id=` | **SSE** 下载进度，`done` 事件携带产物文件名 |
-| `GET /local-books` | 本地书架列表 |
-| `GET /book-download?filename=` | 下载产物文件 |
-| `GET /book-delete?filename=` | 删除产物文件 |
-| `GET /sources` | 书源列表 |
-| `GET /sources/check` | 书源可用性探测 |
-| `GET /rules/update` | 在线更新书源规则并热重载（下载中返回 409） |
+| `GET /` | Web UI (static page) |
+| `GET /config` | Runtime configuration (read-only) |
+| `GET /search/aggregated?kw=` | Aggregated search |
+| `GET /suggestion?kw=` | Search suggestions |
+| `GET /book-fetch?url=&format=` | Create a download job, returns `{jobId}` (202) |
+| `GET /download-progress?id=` | **SSE** download progress; the `done` event carries the output filename |
+| `GET /local-books` | Local bookshelf list |
+| `GET /book-download?filename=` | Download a produced file |
+| `GET /book-delete?filename=` | Delete a produced file |
+| `GET /sources` | Book source list |
+| `GET /sources/check` | Book source availability probe |
+| `GET /rules/update` | Update book-source rules online and hot-reload (409 while downloading) |
 
-示例：
+Examples:
 
 ```bash
-# 搜索
-curl "http://127.0.0.1:7765/search/aggregated?kw=斗破苍穹"
+# Search
+curl "http://127.0.0.1:7765/search/aggregated?kw=Battle%20Through%20the%20Heavens"
 
-# 创建下载任务（url 来自搜索结果）
+# Create a download job (url comes from the search results)
 curl "http://127.0.0.1:7765/book-fetch?url=https://example.com/book/1.html&format=epub"
 
-# 订阅进度（curl -N 不缓冲）
+# Subscribe to progress (curl -N disables buffering)
 curl -N "http://127.0.0.1:7765/download-progress?id=<jobId>"
 ```
 
-## 与源项目的关系
+## Relationship with the original project
 
-| 维度 | so-novel（Java） | so-novel-rs |
+| Dimension | so-novel (Java) | so-novel-rs |
 | --- | --- | --- |
-| 形态 | CLI / TUI / Web | 仅 Web |
-| 运行时 | JRE + V8 引擎池 | 单文件二进制（QuickJS 内嵌，按需创建销毁） |
-| 空闲内存 | 300MB+ | ≤ 15MB |
-| 书源规则 | JSON | **同一套 JSON，完全兼容** |
-| 输出格式 | txt / epub / html / pdf | txt / epub |
-| 配置格式 | config.ini | config.toml（字段语义一一对应） |
+| Interface | CLI / TUI / Web | Web only |
+| Runtime | JRE + V8 engine pool | Single binary (embedded QuickJS, created and destroyed on demand) |
+| Idle memory | 300MB+ | ≤ 15MB |
+| Book-source rules | JSON | **Same JSON, fully compatible** |
+| Output formats | txt / epub / html / pdf | txt / epub |
+| Config format | config.ini | config.toml (fields map one-to-one) |
 
-
-## 开发
+## Development
 
 ```bash
-cargo test            # 90 单元测试 + 27 API 契约测试
-cargo clippy --all-targets   # stable/nightly 零警告
+cargo test                      # 90 unit tests + 27 API contract tests
+cargo clippy --all-targets      # zero warnings on stable/nightly
 cargo fmt --all -- --check
 ```
 
+## Disclaimer
 
-
-
-## 免责声明
-
-本项目仅供学习交流，请勿用于商业用途；请支持正版，下载内容请在 24 小时内删除。书源规则来自开源社区，与本项目作者无关。
+This project is for study and exchange purposes only; do not use it commercially. Please support official releases and delete any downloaded content within 24 hours. Book-source rules come from the open-source community and are unrelated to the author of this project.
